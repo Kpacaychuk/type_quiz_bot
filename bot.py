@@ -2,6 +2,7 @@ import asyncio
 import json
 import random
 import string
+import test3
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -88,24 +89,89 @@ def generate_quiz_id():
 def similarity(a, b):
     return len(set(a) & set(b))
 
+# def make_groups(answers, group_size=5):
+#     people = list(answers.keys())
+#     groups = []
+#     used = set()
+
+#     while len(used) < len(people):
+#         remaining = [p for p in people if p not in used]
+#         group = [random.choice(remaining)]
+#         used.add(group[0])
+
+#         while len(group) < group_size:
+#             candidates = [p for p in people if p not in used]
+#             p = min(candidates, key=lambda x: sum(similarity(answers[x], answers[g]) for g in group))
+#             group.append(p)
+#             used.add(p)
+
+#         groups.append(group)
+#     return groups
+
 def make_groups(answers, group_size=5):
+    """
+    answers: dict { user_id_str: [a0, a1, a2] } -- порядок важен
+    group_size: желаемый размер группы (обычно 5)
+    Возвращает список групп (каждая группа — список user_id_str).
+    """
     people = list(answers.keys())
     groups = []
     used = set()
 
+    def count_position_matches(candidate, group, pos):
+        """Количество совпадений по ответу на позиции pos с участниками группы"""
+        matches = 0
+        for g in group:
+            if pos < len(answers[g]) and pos < len(answers[candidate]) and answers[g][pos] == answers[candidate][pos]:
+                matches += 1
+        return matches
+
     while len(used) < len(people):
         remaining = [p for p in people if p not in used]
-        group = [random.choice(remaining)]
-        used.add(group[0])
+        seed = random.choice(remaining)
+        group = [seed]
+        used.add(seed)
 
-        while len(group) < group_size:
+        while len(group) < group_size and len(used) < len(people):
             candidates = [p for p in people if p not in used]
-            p = min(candidates, key=lambda x: sum(similarity(answers[x], answers[g]) for g in group))
-            group.append(p)
-            used.add(p)
+            best_candidates = []
+
+            # 1️⃣ Проверяем по первой позиции — ищем тех, у кого нет совпадений вообще
+            no_match_first = [c for c in candidates if count_position_matches(c, group, 0) == 0]
+            if no_match_first:
+                best_candidates = no_match_first
+            else:
+                # 2️⃣ Иначе ищем с минимальными совпадениями на первой позиции
+                min_first = min(count_position_matches(c, group, 0) for c in candidates)
+                best_candidates = [c for c in candidates if count_position_matches(c, group, 0) == min_first]
+
+            # 3️⃣ Если всё ещё несколько — смотрим по второй позиции
+            if len(best_candidates) > 1:
+                no_match_second = [c for c in best_candidates if count_position_matches(c, group, 1) == 0]
+                if no_match_second:
+                    best_candidates = no_match_second
+                else:
+                    min_second = min(count_position_matches(c, group, 1) for c in best_candidates)
+                    best_candidates = [c for c in best_candidates if count_position_matches(c, group, 1) == min_second]
+
+            # 4️⃣ Если всё ещё несколько — смотрим по третьей позиции
+            if len(best_candidates) > 1:
+                no_match_third = [c for c in best_candidates if count_position_matches(c, group, 2) == 0]
+                if no_match_third:
+                    best_candidates = no_match_third
+                else:
+                    min_third = min(count_position_matches(c, group, 2) for c in best_candidates)
+                    best_candidates = [c for c in best_candidates if count_position_matches(c, group, 2) == min_third]
+
+            # 5️⃣ Если всё ещё несколько — выбираем случайного из равных по критериям
+            best = random.choice(best_candidates)
+            group.append(best)
+            used.add(best)
 
         groups.append(group)
+
     return groups
+
 
 # ====== Команда /start ======
 @dp.message(Command("start"))
@@ -258,6 +324,36 @@ async def join_quiz(message: types.Message):
     # Начинаем опрос
     await send_quiz_keyboard(message, quiz_id)
 
+
+# ====== Генерация тестовых данных ======
+@dp.message(Command("generate_random_data"))
+async def generate_random_data(message: types.Message):
+    args = message.text.split()
+    if len(args) != 2:
+        await message.answer("❗ Укажи ID опроса: /generate_random_data ABC123")
+        return
+
+    quiz_id = args[1].strip().upper()
+    data = load_data()
+
+    if quiz_id not in data or quiz_id == "users":
+        await message.answer("❌ Такого опроса не существует.")
+        return
+
+    quiz = data.get(quiz_id)
+    if not isinstance(quiz, dict) or "participants" not in quiz:
+        await message.answer("❌ Такого опроса не существует.")
+        return
+
+    fake_ids = [str(300000001 + i) for i in range(34)]
+    for fid in fake_ids:
+        quiz["participants"][fid] = {
+            "answers": random.sample(range(1, 6), 3)
+        }
+
+    save_data(data)
+    await message.answer(f"✅ В опрос {quiz_id} добавлены 34 фейковых участника.")
+
 # ====== Отправка клавиатуры с вариантами ======
 async def send_quiz_keyboard(message, quiz_id):
     data = load_data()
@@ -321,46 +417,103 @@ async def handle_vote(callback: types.CallbackQuery):
         await check_and_finalize_quiz(quiz_id)
 
 # ====== Проверка завершённости ======
+# async def check_and_finalize_quiz(quiz_id):
+#     data = load_data()
+#     quiz = data[quiz_id]
+#     participants = quiz["participants"]
+
+#     if len(participants) == 35 and all(len(p["answers"]) == 3 for p in participants.values()):
+#         quiz["active"] = False
+#         answers = {uid: set(p["answers"]) for uid, p in participants.items()}
+#         groups = make_groups(answers)
+#         #groups = make_groups(answers, num_groups=7, group_size=5)
+
+#         result_text = f"📊 Результаты опроса #{quiz_id}:\n\n"
+        
+#         for i, group in enumerate(groups, 1):
+#             result_text += f"Группа {i}:\n"
+#             for uid in group:
+#                 uid_str = str(uid)
+#                 # Получаем имя и фамилию
+#                 first_name, last_name = get_user_name(uid)
+#                 # Получаем ответы
+#                 user_answers = sorted(participants[uid_str]["answers"])
+#                 answers_str = ", ".join(map(str, user_answers))
+                
+#                 # Формируем строку: Имя Фамилия (ответы: 1, 2, 3) [ID: 123456]
+#                 if first_name and last_name:
+#                     result_text += f"— {first_name} {last_name} (ответы: {answers_str}) [ID: {uid_str}]\n"
+#                 else:
+#                     result_text += f"— Неизвестный пользователь (ответы: {answers_str}) [ID: {uid_str}]\n"
+#             result_text += "\n"
+        
+#         # Добавляем информацию о вариантах ответов в конце
+#         options = quiz.get("options", ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4", "Вариант 5"])
+#         result_text += "Варианты ответов:\n"
+#         for i, option in enumerate(options, 1):
+#             result_text += f"{i}. {option}\n"
+
+#         # Отправляем результаты создателю
+#         creator_id = quiz["creator"]
+#         await bot.send_message(creator_id, result_text)
+#         save_data(data)
+
 async def check_and_finalize_quiz(quiz_id):
+    from collections import Counter
+
     data = load_data()
     quiz = data[quiz_id]
     participants = quiz["participants"]
 
     if len(participants) == 35 and all(len(p["answers"]) == 3 for p in participants.values()):
         quiz["active"] = False
-        answers = {uid: set(p["answers"]) for uid, p in participants.items()}
-        groups = make_groups(answers)
-        #groups = make_groups(answers, num_groups=7, group_size=5)
+
+        # Важно: сохраняем порядок ответов как список (не set!)
+        # participants keys — строки (user_id)
+        answers = {uid: p["answers"] for uid, p in participants.items()}
+
+        groups = make_groups(answers, group_size=5)
 
         result_text = f"📊 Результаты опроса #{quiz_id}:\n\n"
-        
         for i, group in enumerate(groups, 1):
             result_text += f"Группа {i}:\n"
+            group_first_answers = []
+            group_second_answers = []
+            group_third_answers = []
             for uid in group:
                 uid_str = str(uid)
-                # Получаем имя и фамилию
                 first_name, last_name = get_user_name(uid)
-                # Получаем ответы
-                user_answers = sorted(participants[uid_str]["answers"])
+                # Сохраняем порядок ответов (не сортируем!)
+                user_answers = participants[uid_str]["answers"]
                 answers_str = ", ".join(map(str, user_answers))
-                
-                # Формируем строку: Имя Фамилия (ответы: 1, 2, 3) [ID: 123456]
+                # Сбор ответов для подсчета повторов
+                if len(user_answers) >= 1:
+                    group_first_answers.append(user_answers[0])
+                if len(user_answers) >= 2:
+                    group_second_answers.append(user_answers[1])
+                if len(user_answers) >= 3:
+                    group_third_answers.append(user_answers[2])
+
                 if first_name and last_name:
                     result_text += f"— {first_name} {last_name} (ответы: {answers_str}) [ID: {uid_str}]\n"
                 else:
                     result_text += f"— Неизвестный пользователь (ответы: {answers_str}) [ID: {uid_str}]\n"
+            # Добавим статистику по повторам после участников
+            result_text += "\n  Повторы вариантов ответа (в группе):\n"
+            result_text += f"    1-й ответ: {dict(Counter(group_first_answers))}\n"
+            result_text += f"    2-й ответ: {dict(Counter(group_second_answers))}\n"
+            result_text += f"    3-й ответ: {dict(Counter(group_third_answers))}\n"
             result_text += "\n"
-        
-        # Добавляем информацию о вариантах ответов в конце
+
         options = quiz.get("options", ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4", "Вариант 5"])
         result_text += "Варианты ответов:\n"
         for i, option in enumerate(options, 1):
             result_text += f"{i}. {option}\n"
 
-        # Отправляем результаты создателю
         creator_id = quiz["creator"]
         await bot.send_message(creator_id, result_text)
         save_data(data)
+
 
 # ====== Обработка username ======
 @dp.message(~StateFilter(NameInput.waiting_for_name))
