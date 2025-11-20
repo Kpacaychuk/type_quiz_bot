@@ -188,14 +188,11 @@ async def cmd_start(message: types.Message, state: FSMContext):
         first_name, last_name = get_user_name(user_id)
         await message.answer(f"👋 Привет, {first_name} {last_name}!\n\n"
                              "Я бот для группового опроса.\n"
-                             "Создай опрос:\n"
-                             "/create_quiz\n"
-                             "Или с вариантами ответов:\n"
-                             "/create_quiz вариант1 вариант2 вариант3 вариант4 вариант5\n\n"
-                             "Присоединись к существующему опросу:\n"
+                             "Присоединись к опросу, отправив мне следующую команду:\n"
                              "/join_to_quiz ABC123\n"
                              "где ABC123 — ID опроса\n\n"
-                             "Изменить имя: /change_my_name")
+                             "Если написали имя или фамилию неправильно, изменить можно отправив мне следующую команду:\n"
+                             "/change_my_name")
 
 # ====== Обработка ввода имени ======
 @dp.message(StateFilter(NameInput.waiting_for_name))
@@ -250,42 +247,24 @@ async def change_my_name(message: types.Message, state: FSMContext):
 # ====== Создание опроса ======
 @dp.message(Command("create_quiz"))
 async def create_quiz(message: types.Message):
-    # Получаем текст команды и аргументы
-    command_text = message.text or ""
-    parts = command_text.split(maxsplit=6)  # Команда + максимум 6 аргументов
-    
-    # Если переданы варианты ответов (5 аргументов после команды)
-    if len(parts) >= 6:
-        # Берем первые 5 аргументов после команды
-        options = parts[1:6]
-        # Убираем пробелы и проверяем, что все варианты не пустые
-        options = [opt.strip() for opt in options if opt.strip()]
-        if len(options) < 5:
-            await message.answer("❗ Необходимо указать 5 вариантов ответов.\n"
-                                 "Формат: /create_quiz вариант1 вариант2 вариант3 вариант4 вариант5\n"
-                                 "Или: /create_quiz (без аргументов для вариантов по умолчанию)\n\n"
-                                 "⚠️ Если вариант содержит пробелы, используйте кавычки:\n"
-                                 "/create_quiz \"Вариант 1\" \"Вариант 2\" вариант3 вариант4 вариант5")
-            return
-        # Обрезаем длинные варианты (максимум 64 символа для кнопки Telegram)
-        options = [opt[:64] for opt in options]
-    else:
-        # Используем варианты по умолчанию
-        options = ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4", "Вариант 5"]
-    
+    # Всегда используем варианты по умолчанию, параметры игнорируются
+    options = ["Креативы", "Реализаторы", "Стратеги", "Коммуникаторы", "Исследователи"]
+
     data = load_data()
     quiz_id = generate_quiz_id()
     data[quiz_id] = {
         "creator": message.from_user.id,
         "active": True,
         "participants": {},
-        "options": options,  # Сохраняем тексты вариантов
+        "options": options,
     }
     save_data(data)
     options_text = "\n".join([f"{i+1}. {opt}" for i, opt in enumerate(options)])
-    await message.answer(f"✅ Опрос создан!\nID опроса: `{quiz_id}`\n\n"
-                         f"Варианты ответов:\n{options_text}", 
-                         parse_mode="Markdown")
+    await message.answer(
+        f"✅ Опрос создан!\nID опроса: `{quiz_id}`\n\n"
+        f"Варианты ответов:\n{options_text}",
+        parse_mode="Markdown"
+    )
 
 # ====== Присоединение к опросу ======
 @dp.message(Command("join_to_quiz"))
@@ -345,14 +324,49 @@ async def generate_random_data(message: types.Message):
         await message.answer("❌ Такого опроса не существует.")
         return
 
-    fake_ids = [str(300000001 + i) for i in range(34)]
+    fake_ids = [str(300000001 + i) for i in range(26)]
     for fid in fake_ids:
         quiz["participants"][fid] = {
             "answers": random.sample(range(1, 6), 3)
         }
 
     save_data(data)
-    await message.answer(f"✅ В опрос {quiz_id} добавлены 34 фейковых участника.")
+    await message.answer(f"✅ В опрос {quiz_id} добавлены 26 фейковых участника.")
+
+
+# ====== Принудительная остановка опроса ======
+@dp.message(Command("stop_quiz"))
+async def stop_quiz(message: types.Message):
+    args = message.text.split()
+    if len(args) != 2:
+        await message.answer("❗ Укажи ID опроса: /stop_quiz ABC123")
+        return
+
+    quiz_id = args[1].strip().upper()
+    data = load_data()
+
+    if quiz_id not in data or quiz_id == "users":
+        await message.answer("❌ Такого опроса не существует.")
+        return
+
+    quiz = data.get(quiz_id)
+    if not isinstance(quiz, dict) or "participants" not in quiz:
+        await message.answer("❌ Такого опроса не существует.")
+        return
+
+    if quiz["creator"] != message.from_user.id:
+        await message.answer("❗ Только создатель может остановить опрос.")
+        return
+
+    if not quiz.get("active", False):
+        await message.answer("⚠️ Опрос уже завершён.")
+        return
+
+    success, error = await check_and_finalize_quiz(quiz_id, force=True)
+    if success:
+        await message.answer(f"✅ Опрос {quiz_id} остановлен. Результаты отправлены.")
+    else:
+        await message.answer(error or "❌ Не удалось остановить опрос.")
 
 # ====== Отправка клавиатуры с вариантами ======
 async def send_quiz_keyboard(message, quiz_id):
@@ -458,61 +472,81 @@ async def handle_vote(callback: types.CallbackQuery):
 #         await bot.send_message(creator_id, result_text)
 #         save_data(data)
 
-async def check_and_finalize_quiz(quiz_id):
+async def check_and_finalize_quiz(quiz_id, force=False):
     from collections import Counter
 
     data = load_data()
-    quiz = data[quiz_id]
+    quiz = data.get(quiz_id)
+    if quiz_id == "users" or not isinstance(quiz, dict) or "participants" not in quiz:
+        return False, "❌ Такого опроса не существует."
+
     participants = quiz["participants"]
+    if not participants:
+        return False, "⚠️ В опросе нет участников."
 
-    if len(participants) == 35 and all(len(p["answers"]) == 3 for p in participants.values()):
-        quiz["active"] = False
+    if force:
+        completed = {uid: p for uid, p in participants.items() if len(p.get("answers", [])) == 3}
+        if not completed:
+            return False, "⚠️ Ни один участник ещё не дал 3 ответа."
+    else:
+        if len(participants) != 35 or not all(len(p.get("answers", [])) == 3 for p in participants.values()):
+            return False, None
+        completed = participants
 
-        # Важно: сохраняем порядок ответов как список (не set!)
-        # participants keys — строки (user_id)
-        answers = {uid: p["answers"] for uid, p in participants.items()}
+    quiz["active"] = False
 
-        groups = make_groups(answers, group_size=5)
+    answers = {uid: p["answers"] for uid, p in completed.items()}
+    groups = make_groups(answers, group_size=5)
+    option_texts = quiz.get("options", ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4", "Вариант 5"])
 
-        result_text = f"📊 Результаты опроса #{quiz_id}:\n\n"
-        for i, group in enumerate(groups, 1):
-            result_text += f"Группа {i}:\n"
-            group_first_answers = []
-            group_second_answers = []
-            group_third_answers = []
-            for uid in group:
-                uid_str = str(uid)
-                first_name, last_name = get_user_name(uid)
-                # Сохраняем порядок ответов (не сортируем!)
-                user_answers = participants[uid_str]["answers"]
-                answers_str = ", ".join(map(str, user_answers))
-                # Сбор ответов для подсчета повторов
-                if len(user_answers) >= 1:
-                    group_first_answers.append(user_answers[0])
-                if len(user_answers) >= 2:
-                    group_second_answers.append(user_answers[1])
-                if len(user_answers) >= 3:
-                    group_third_answers.append(user_answers[2])
+    def answer_num_to_text(choice: int) -> str:
+        idx = choice - 1
+        if 0 <= idx < len(option_texts):
+            return option_texts[idx]
+        return f"Вариант {choice}"
 
-                if first_name and last_name:
-                    result_text += f"— {first_name} {last_name} (ответы: {answers_str}) [ID: {uid_str}]\n"
-                else:
-                    result_text += f"— Неизвестный пользователь (ответы: {answers_str}) [ID: {uid_str}]\n"
-            # Добавим статистику по повторам после участников
-            result_text += "\n  Повторы вариантов ответа (в группе):\n"
-            result_text += f"    1-й ответ: {dict(Counter(group_first_answers))}\n"
-            result_text += f"    2-й ответ: {dict(Counter(group_second_answers))}\n"
-            result_text += f"    3-й ответ: {dict(Counter(group_third_answers))}\n"
-            result_text += "\n"
+    result_text = f"📊 Результаты опроса #{quiz_id}:\n\n"
+    for i, group in enumerate(groups, 1):
+        result_text += f"Группа {i}:\n"
+        group_first_answers = []
+        group_second_answers = []
+        group_third_answers = []
+        for uid in group:
+            uid_str = str(uid)
+            first_name, last_name = get_user_name(uid)
+            user_answers = completed[uid_str]["answers"]
+            answer_texts = [answer_num_to_text(ans) for ans in user_answers]
+            answers_str = ", ".join(answer_texts)
+            if len(user_answers) >= 1:
+                group_first_answers.append(answer_num_to_text(user_answers[0]))
+            if len(user_answers) >= 2:
+                group_second_answers.append(answer_num_to_text(user_answers[1]))
+            if len(user_answers) >= 3:
+                group_third_answers.append(answer_num_to_text(user_answers[2]))
 
-        options = quiz.get("options", ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4", "Вариант 5"])
-        result_text += "Варианты ответов:\n"
-        for i, option in enumerate(options, 1):
-            result_text += f"{i}. {option}\n"
+            if first_name and last_name:
+                result_text += f"— {first_name} {last_name} (ответы: {answers_str}) [ID: {uid_str}]\n"
+            else:
+                result_text += f"— Неизвестный пользователь (ответы: {answers_str}) [ID: {uid_str}]\n"
+        # result_text += "\n  Повторы вариантов ответа (в группе):\n"
+        # result_text += f"    1-й ответ: {dict(Counter(group_first_answers))}\n"
+        # result_text += f"    2-й ответ: {dict(Counter(group_second_answers))}\n"
+        # result_text += f"    3-й ответ: {dict(Counter(group_third_answers))}\n"
+        result_text += "\n"
 
-        creator_id = quiz["creator"]
-        await bot.send_message(creator_id, result_text)
-        save_data(data)
+    if force and len(completed) < len(participants):
+        skipped = len(participants) - len(completed)
+        result_text += f"⚠️ {skipped} участника(ов) не завершили ответы и не попали в группы.\n\n"
+
+    # options = quiz.get("options", ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4", "Вариант 5"])
+    # result_text += "Варианты ответов:\n"
+    # for i, option in enumerate(options, 1):
+    #     result_text += f"{i}. {option}\n"
+
+    creator_id = quiz["creator"]
+    await bot.send_message(creator_id, result_text)
+    save_data(data)
+    return True, None
 
 
 # ====== Обработка username ======
