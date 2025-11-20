@@ -305,33 +305,33 @@ async def join_quiz(message: types.Message):
 
 
 # ====== Генерация тестовых данных ======
-@dp.message(Command("generate_random_data"))
-async def generate_random_data(message: types.Message):
-    args = message.text.split()
-    if len(args) != 2:
-        await message.answer("❗ Укажи ID опроса: /generate_random_data ABC123")
-        return
+# @dp.message(Command("generate_random_data"))
+# async def generate_random_data(message: types.Message):
+#     args = message.text.split()
+#     if len(args) != 2:
+#         await message.answer("❗ Укажи ID опроса: /generate_random_data ABC123")
+#         return
 
-    quiz_id = args[1].strip().upper()
-    data = load_data()
+#     quiz_id = args[1].strip().upper()
+#     data = load_data()
 
-    if quiz_id not in data or quiz_id == "users":
-        await message.answer("❌ Такого опроса не существует.")
-        return
+#     if quiz_id not in data or quiz_id == "users":
+#         await message.answer("❌ Такого опроса не существует.")
+#         return
 
-    quiz = data.get(quiz_id)
-    if not isinstance(quiz, dict) or "participants" not in quiz:
-        await message.answer("❌ Такого опроса не существует.")
-        return
+#     quiz = data.get(quiz_id)
+#     if not isinstance(quiz, dict) or "participants" not in quiz:
+#         await message.answer("❌ Такого опроса не существует.")
+#         return
 
-    fake_ids = [str(300000001 + i) for i in range(26)]
-    for fid in fake_ids:
-        quiz["participants"][fid] = {
-            "answers": random.sample(range(1, 6), 3)
-        }
+#     fake_ids = [str(300000001 + i) for i in range(26)]
+#     for fid in fake_ids:
+#         quiz["participants"][fid] = {
+#             "answers": random.sample(range(1, 6), 3)
+#         }
 
-    save_data(data)
-    await message.answer(f"✅ В опрос {quiz_id} добавлены 26 фейковых участника.")
+#     save_data(data)
+#     await message.answer(f"✅ В опрос {quiz_id} добавлены 26 фейковых участника.")
 
 
 # ====== Принудительная остановка опроса ======
