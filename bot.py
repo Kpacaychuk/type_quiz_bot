@@ -26,6 +26,7 @@ dp = Dispatcher()
 DATA_FILE = "data.json"
 TARGET_PARTICIPANTS = 32
 DEFAULT_GROUP_SIZES = [7, 7, 6, 6, 6]
+MAX_ACTIVE_QUIZZES = 100
 
 # ====== Состояния для FSM ======
 class NameInput(StatesGroup):
@@ -85,6 +86,26 @@ def user_has_name(user_id):
 # ====== Генерация ID ======
 def generate_quiz_id():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
+# ====== Получение списка активных опросов пользователя ======
+def get_active_quiz_ids(user_id):
+    """Получить список ID активных опросов, созданных пользователем"""
+    data = load_data()
+    active_quiz_ids = []
+    for quiz_id, quiz in data.items():
+        # Пропускаем раздел users
+        if quiz_id == "users":
+            continue
+        # Проверяем, что это действительно квиз
+        if isinstance(quiz, dict) and "creator" in quiz and "active" in quiz:
+            if quiz["creator"] == user_id and quiz.get("active", False):
+                active_quiz_ids.append(quiz_id)
+    return active_quiz_ids
+
+# ====== Подсчет активных опросов пользователя ======
+def count_active_quizzes(user_id):
+    """Подсчитать количество активных опросов, созданных пользователем"""
+    return len(get_active_quiz_ids(user_id))
 
 # ====== Метрика похожести ======
 def similarity(a, b):
@@ -271,6 +292,21 @@ async def change_my_name(message: types.Message, state: FSMContext):
 # ====== Создание опроса ======
 @dp.message(Command("create_quiz"))
 async def create_quiz(message: types.Message):
+    user_id = message.from_user.id
+    
+    # Проверяем количество активных опросов пользователя
+    active_quiz_ids = get_active_quiz_ids(user_id)
+    active_count = len(active_quiz_ids)
+    if active_count >= MAX_ACTIVE_QUIZZES:
+        # Формируем список ID для вывода
+        ids_text = ", ".join(active_quiz_ids) if active_quiz_ids else "нет"
+        await message.answer(f"⚠️ У тебя уже {active_count} активных опросов. "
+                             f"Максимальное количество активных опросов: {MAX_ACTIVE_QUIZZES}.\n\n"
+                             f"ID активных опросов:\n`{ids_text}`\n\n"
+                             f"Заверши некоторые опросы перед созданием новых.",
+                             parse_mode="Markdown")
+        return
+    
     # Всегда используем варианты по умолчанию, параметры игнорируются
     options = ["Креативы", "Реализаторы", "Стратеги", "Коммуникаторы", "Исследователи"]
 
@@ -387,6 +423,19 @@ async def stop_quiz(message: types.Message):
         await message.answer("⚠️ Опрос уже завершён.")
         return
 
+    # Проверяем, есть ли участники с завершенными ответами
+    participants = quiz.get("participants", {})
+    completed_participants = {uid: p for uid, p in participants.items() if len(p.get("answers", [])) == 3}
+    
+    # Если нет участников или нет участников с 3 ответами - просто деактивируем опрос
+    if not participants or not completed_participants:
+        quiz["active"] = False
+        save_data(data)
+        await message.answer(f"✅ Опрос {quiz_id} остановлен.\n"
+                             f"В опросе нет участников с завершенными ответами, поэтому результаты не сформированы.")
+        return
+    
+    # Если есть участники с ответами - используем стандартную логику
     success, error = await check_and_finalize_quiz(quiz_id, force=True)
     if success:
         await message.answer(f"✅ Опрос {quiz_id} остановлен. Результаты отправлены.")
