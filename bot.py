@@ -2,7 +2,6 @@ import asyncio
 import json
 import random
 import string
-import test3
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -25,6 +24,8 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
 DATA_FILE = "data.json"
+TARGET_PARTICIPANTS = 32
+DEFAULT_GROUP_SIZES = [7, 7, 6, 6, 6]
 
 # ====== Состояния для FSM ======
 class NameInput(StatesGroup):
@@ -108,15 +109,38 @@ def similarity(a, b):
 #         groups.append(group)
 #     return groups
 
-def make_groups(answers, group_size=5):
+def make_groups(answers, group_size=5, group_sizes=None):
     """
     answers: dict { user_id_str: [a0, a1, a2] } -- порядок важен
-    group_size: желаемый размер группы (обычно 5)
-    Возвращает список групп (каждая группа — список user_id_str).
+    group_size: желаемый размер группы (по умолчанию 5)
+    group_sizes: опциональный список размеров групп (например [7,7,6,6,6])
+    Возвращает список групп (каждая группа — список user_id_str)
     """
     people = list(answers.keys())
     groups = []
     used = set()
+
+    def build_group_size_plan(total):
+        if group_sizes:
+            plan = []
+            remaining = total
+            for size in group_sizes:
+                if remaining <= 0:
+                    break
+                plan.append(min(size, remaining))
+                remaining -= size
+            while remaining > 0:
+                plan.append(min(group_size, remaining))
+                remaining -= group_size
+            return plan
+        plan = []
+        remaining = total
+        while remaining > 0:
+            plan.append(min(group_size, remaining))
+            remaining -= group_size
+        return plan
+
+    desired_sizes = build_group_size_plan(len(people))
 
     def count_position_matches(candidate, group, pos):
         """Количество совпадений по ответу на позиции pos с участниками группы"""
@@ -126,13 +150,15 @@ def make_groups(answers, group_size=5):
                 matches += 1
         return matches
 
-    while len(used) < len(people):
+    size_index = 0
+    while len(used) < len(people) and size_index < len(desired_sizes):
+        current_group_target = desired_sizes[size_index]
         remaining = [p for p in people if p not in used]
         seed = random.choice(remaining)
         group = [seed]
         used.add(seed)
 
-        while len(group) < group_size and len(used) < len(people):
+        while len(group) < current_group_target and len(used) < len(people):
             candidates = [p for p in people if p not in used]
             best_candidates = []
 
@@ -169,6 +195,7 @@ def make_groups(answers, group_size=5):
             used.add(best)
 
         groups.append(group)
+        size_index += 1
 
     return groups
 
@@ -228,14 +255,11 @@ async def process_name_input(message: types.Message, state: FSMContext):
     
     await message.answer(f"✅ Спасибо, {first_name} {last_name}! Твои данные сохранены.\n\n"
                          "Я бот для группового опроса.\n"
-                         "Создай опрос:\n"
-                         "/create_quiz\n"
-                         "Или с вариантами ответов:\n"
-                         "/create_quiz вариант1 вариант2 вариант3 вариант4 вариант5\n\n"
-                         "Присоединись к существующему опросу:\n"
-                         "/join_to_quiz ABC123\n"
-                         "где ABC123 — ID опроса\n\n"
-                         "Изменить имя: /change_my_name")
+                             "Присоединись к опросу, отправив мне следующую команду:\n"
+                             "/join_to_quiz ABC123\n"
+                             "где ABC123 — ID опроса\n\n"
+                             "Если написали имя или фамилию неправильно, изменить можно отправив мне следующую команду:\n"
+                             "/change_my_name")
 
 # ====== Команда изменения имени ======
 @dp.message(Command("change_my_name"))
@@ -290,8 +314,8 @@ async def join_quiz(message: types.Message):
     if not quiz["active"]:
         await message.answer("⚠️ Этот опрос уже завершён.")
         return
-    if len(quiz["participants"]) >= 35:
-        await message.answer("⚠️ В опросе уже 35 участников.")
+    if len(quiz["participants"]) >= TARGET_PARTICIPANTS:
+        await message.answer(f"⚠️ В опросе уже {TARGET_PARTICIPANTS} участников.")
         return
     # if message.from_user.id == quiz["creator"]:
     #     await message.answer("❗ Создатель не может участвовать в своём опросе.")
@@ -324,14 +348,14 @@ async def join_quiz(message: types.Message):
 #         await message.answer("❌ Такого опроса не существует.")
 #         return
 
-#     fake_ids = [str(300000001 + i) for i in range(26)]
+#     fake_ids = [str(300000001 + i) for i in range(31)]
 #     for fid in fake_ids:
 #         quiz["participants"][fid] = {
 #             "answers": random.sample(range(1, 6), 3)
 #         }
 
 #     save_data(data)
-#     await message.answer(f"✅ В опрос {quiz_id} добавлены 26 фейковых участника.")
+#     await message.answer(f"✅ В опрос {quiz_id} добавлены 31 фейковых участника.")
 
 
 # ====== Принудительная остановка опроса ======
@@ -341,6 +365,7 @@ async def stop_quiz(message: types.Message):
     if len(args) != 2:
         await message.answer("❗ Укажи ID опроса: /stop_quiz ABC123")
         return
+
 
     quiz_id = args[1].strip().upper()
     data = load_data()
@@ -489,14 +514,15 @@ async def check_and_finalize_quiz(quiz_id, force=False):
         if not completed:
             return False, "⚠️ Ни один участник ещё не дал 3 ответа."
     else:
-        if len(participants) != 35 or not all(len(p.get("answers", [])) == 3 for p in participants.values()):
+        if len(participants) != TARGET_PARTICIPANTS or not all(len(p.get("answers", [])) == 3 for p in participants.values()):
             return False, None
         completed = participants
 
     quiz["active"] = False
 
     answers = {uid: p["answers"] for uid, p in completed.items()}
-    groups = make_groups(answers, group_size=5)
+    group_plan = DEFAULT_GROUP_SIZES if len(completed) == sum(DEFAULT_GROUP_SIZES) else None
+    groups = make_groups(answers, group_size=5, group_sizes=group_plan)
     option_texts = quiz.get("options", ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4", "Вариант 5"])
 
     def answer_num_to_text(choice: int) -> str:
@@ -511,7 +537,7 @@ async def check_and_finalize_quiz(quiz_id, force=False):
         group_first_answers = []
         group_second_answers = []
         group_third_answers = []
-        for uid in group:
+        for participant_num, uid in enumerate(group, 1):
             uid_str = str(uid)
             first_name, last_name = get_user_name(uid)
             user_answers = completed[uid_str]["answers"]
@@ -525,9 +551,9 @@ async def check_and_finalize_quiz(quiz_id, force=False):
                 group_third_answers.append(answer_num_to_text(user_answers[2]))
 
             if first_name and last_name:
-                result_text += f"— {first_name} {last_name} (ответы: {answers_str}) [ID: {uid_str}]\n"
+                result_text += f"{participant_num}) {first_name} {last_name} ({answers_str}) [ID: {uid_str}]\n"
             else:
-                result_text += f"— Неизвестный пользователь (ответы: {answers_str}) [ID: {uid_str}]\n"
+                result_text += f"{participant_num}) Неизвестный пользователь ({answers_str}) [ID: {uid_str}]\n"
         # result_text += "\n  Повторы вариантов ответа (в группе):\n"
         # result_text += f"    1-й ответ: {dict(Counter(group_first_answers))}\n"
         # result_text += f"    2-й ответ: {dict(Counter(group_second_answers))}\n"
